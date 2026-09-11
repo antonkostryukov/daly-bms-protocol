@@ -11,14 +11,23 @@ Where a widely used open implementation disagrees, that is called out explicitly
 
 ## ⚠ Applicability
 
-All of this was taken from **one** board:
+Most of this was taken from **one** board; part was re-checked on a second board of the
+same family:
 
-| | |
-|---|---|
-| Model | `R24TK1A-8S100A` (8S, 100 A, 1 A active balancer) |
-| Hardware string (`0x017F`) | `JHB-R24TK-V2.1` |
-| Software string (`0x0178`) | `70_260316_01T6` |
-| Vendor apps | "Smart BMS" and "Smart BMS Pro" / "DALY BMS" |
+| | Board 1 (most findings) | Board 2 (re-checks, Sept 2026) |
+|---|---|---|
+| Model | `R24TK1A-8S100A` (8S, 100 A) | `R24TM` (4–8S, 150 A) |
+| Hardware string (`0x017F`) | `JHB-R24TK-V2.1` | `JHB-R24TM-V2.2` |
+| Software string (`0x0178`) | `70_260316_01T6` | `70_260625_01T4` |
+| Balancer | 1 A active | 1 A active |
+| Temperature sensors | 4 | 2 |
+
+Vendor apps: "Smart BMS" and "Smart BMS Pro" / "DALY BMS".
+
+On board 2 the `0x81` and `0xD2` maps read back with the same layout, a write through
+`0xD2` recalculated derived levels by the §7.3 rules (checked on cell over-voltage only),
+and the measurement failure of §9.4 reproduces. Everything else is from board 1 unless
+stated.
 
 **DALY register maps differ between models and firmware revisions.** Frame formats and the
 Daly command set are fairly universal; the Modbus register addresses in sections 4–8 are
@@ -69,7 +78,7 @@ The board answers **both**:
 |----------|---------|-------|
 | Daly frames | request `0x40`, reply `0x01` | live measurements, 13-byte fixed frames |
 | Modbus RTU | request `0x81`, reply `0x51` | full map, `0x0000`–`0x023F` |
-| Modbus RTU | request `0xD2`, reply `0xD2` | compact settings map from `0x008E` |
+| Modbus RTU | request `0xD2`, reply `0xD2` | compact settings map `0x008B`–`0x00A2` (§7.1) |
 
 The two Modbus address spaces **do not overlap**: registers of the `0xD2` map read as
 `FFFF` through `0x81` and vice versa. Modbus addresses `0x51` and `0x01` do not answer.
@@ -204,6 +213,7 @@ register, `0x10` to write several.
 | `0x010B`+`0x010C` | second capacity value, purpose unknown | `u32` mAh |
 | `0x010D`–`0x0110` | total charged / total discharged | `u32` mAh |
 | `0x0114` | nominal cell voltage | mV |
+| `0x0115` | **sleep timeout** (65535 = never sleep) — see below | 10 s |
 | `0x0116` | **current SOC** (writable — this calibrates the counter) | 0.1 % |
 | `0x0117` / `0x0119` | balancer current setting / balancing enabled | mA / 0–1 |
 | `0x011A` / `0x011B` | balance start voltage / start delta (`0x011A` mirrored at `0x022A`) | mV |
@@ -220,13 +230,27 @@ register, `0x10` to write several.
 | `0x0166` | MOSFET over-temperature | °C + 40 |
 | `0x016E` | short-circuit trip current | A |
 | `0x016F` | **zero-drift current** — dead band of the current reading | 0.01 A |
-| `0x0175` | sleep timeout (65535 = never sleep) | s |
+| `0x0174` | vendor-app **heartbeat** — see below | — |
 | `0x0178` / `0x017F` / `0x018D` / `0x0199` | software / hardware / serial / battery code | ASCII, 7 registers each |
 | `0x01FB` | balance stop voltage | mV |
 | `0x0227` / `0x0229` | SOC calibration: "0 %" and "100 %" cell voltage | mV |
 
 There is **no password check before writing.** The password register is readable plaintext
 and has no effect on write access.
+
+**The sleep timeout is `0x0115`** (board 2, from an HCI log of the app plus read-back). The
+"DALY BMS" app writes the entered number divided by 10 and truncated: 40000 → `4000`,
+65535 → `6553`. The board then rewrites `6553` as `65535`, which means "never sleep" — so
+reading back 65535 after writing 6553 is success, not a mismatch. The 10-second unit is
+inferred from the app; the actual timeout was not timed, because a sleeping board also cuts
+the 12 V rail that may be powering your host.
+
+> **Correction.** An earlier revision of this document listed `0x0175` as the sleep timeout.
+> That was wrong: `0x0175` stayed at 65535 while the real timeout was changed.
+
+**`0x0174` is a heartbeat of the vendor app's session.** While connected, the app writes
+`162` there every 2–6 s. Outside a session the register reads `255`; after the first write
+it reads `2`. What `2` means is not known.
 
 ### 4.3 Threshold structure
 
@@ -260,7 +284,7 @@ The board maintains a parallel, duplicate set of thresholds. Two different layou
 | `0x01C3`–`0x01CD` | pairs: `[protection] [return]`, two registers per parameter |
 | `0x01DD`+ | triplets, stride 3: `[500] [protection] [return]` |
 
-Example triplets on the test board: `0x01DD`/`0x01DE`/`0x01DF` = 500 / 25 / 20 for
+Example triplets on board 1: `0x01DD`/`0x01DE`/`0x01DF` = 500 / 25 / 20 for
 temperature spread, and `0x01E0`/`0x01E1`/`0x01E2` = 500 / 30 / 150 for low SOC (i.e.
 3.0 % trip, 15.0 % return, in 0.1 % units).
 
@@ -391,6 +415,30 @@ The two vendor apps write differently, and the difference matters:
 | "DALY BMS" | `0x81` | writes every level explicitly, in bundles |
 | "Smart BMS" | `0xD2` | writes one register per setting |
 
+The `0xD2` map is a compact block of **(warning, protection) pairs**, `0x008B`–`0x00A2`.
+Write the protection register and the board derives the rest (§7.2).
+
+| Parameter | Protection | Warning | Encoding |
+|-----------|------------|---------|----------|
+| Cell over-voltage | `0x008C` | `0x008B` | mV |
+| Cell under-voltage | `0x008E` | `0x008D` | mV |
+| Pack over-voltage | `0x0090` | `0x008F` | V×10 |
+| Pack under-voltage | `0x0092` | `0x0091` | V×10 |
+| Charge current | `0x0094` | `0x0093` | 30000 − A×10 |
+| Discharge current | `0x0096` | `0x0095` | 30000 + A×10 |
+| Charge over-temperature | `0x0098` | `0x0097` | °C + 40 |
+| Charge under-temperature | `0x009A` | `0x0099` | °C + 40 |
+| Discharge over-temperature | `0x009C` | `0x009B` | °C + 40 |
+| Discharge under-temperature | `0x009E` | `0x009D` | °C + 40 |
+| Cell spread | `0x00A0` | `0x009F` | mV |
+| Temperature spread | `0x00A2` | `0x00A1` | °C, **no offset** |
+
+The map ends at `0x00A2`: `0x00A3`+ read `3000 / 10 / 1 / 1`, which matches neither the SOC
+thresholds nor MOSFET over-temperature. SOC, capacity and balancer settings have no `0xD2`
+address. The whole table was read back on board 2 and matched the `0x81` view pair for
+pair, except the discharge current of the factory-fresh board (§7.5); `0x008C` was found
+there by position and value and then confirmed by writing it.
+
 ### 7.2 The board recalculates derived levels — but only through `0xD2`
 
 Write a single protection value to the `0xD2` map and the board fills in the warning, the
@@ -421,6 +469,9 @@ you must write the derived registers yourself.
 | Pack, high | protection **−0.8 V** | protection+0.4 / protection−0.4 |
 | Currents | **0.8 × protection** | no second layer; `L3` = **1.2 × protection** |
 | Temperature spread | unchanged | unchanged; return = protection − 1 |
+
+Re-checked on board 2 for cell over-voltage: writing 3650 through `0xD2` gave warning and
+return 3600 and second layer 3700 / 3650.
 
 **The "DALY BMS" app uses different constants** — it sets `L3` to `⌊4/3 × protection⌋` and
 the low-cell warning to `protection + 100`. Its writes therefore overwrite the board's own
@@ -462,6 +513,10 @@ Two caveats on reading back:
 - **Exact comparison gives false negatives on live values.** Writing an SOC of 16 % while a
   67 A discharge was running read back as 15.9 % — the counter ticked between the write and
   the check. The write was fine.
+- **A factory-fresh board can disagree with itself.** Board 2 out of the box read discharge
+  current as 96 / 120 / 144 A through `0x81` but 120 / 150 A through `0xD2`; the two views
+  converged only after the first round of setting changes. Cross-check both views on a new
+  board before trusting either.
 
 ---
 
@@ -615,6 +670,9 @@ flowing — the measurement path fails, the power path does not.
   the switch, the charger loses its load, and its output jumps. The pack is behind the open
   MOSFET and does not see it.
 - **The balancer is not involved** — reproduced with balancing disabled.
+- **It is not a defect of one board.** Replacing board 1 with board 2 left the behaviour
+  unchanged at charge currents above 15 A. What the two boards share is the DALY measurement
+  front end and firmware base — and the charger.
 
 Root cause not established.
 
@@ -642,6 +700,8 @@ Check the transport, then sanity-check the values.
 - "Changed it and changed it back" leaves derived registers shifted.
 - A valid reply can still contain impossible values.
 - Setting changes and alarms share one 400-record ring.
+- The sleep timeout is `0x0115` in 10 s units, not `0x0175`; "never" reads back as 65535.
+- On a fresh board, cross-check the `0x81` view against `0xD2`.
 
 ---
 
