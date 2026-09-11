@@ -66,7 +66,25 @@ ground, so no isolation is required.
 
 Useful side effect for diagnostics: **a tripped protection and sleep look different from
 outside.** On a protection trip the BMS logic keeps running — the 12 V rail stays up, frames
-keep coming, only the power path opens. In sleep everything dies, including the 12 V rail.
+keep coming, only the power path opens. In sleep the logic and the 12 V rail go down,
+while the power path stays closed (see below).
+
+### Sleep
+
+Per DALY's own description
+([Smart BMS Control Strategy](https://www.dalybms.com/news/daly-smart-bms-control-strategy/)):
+
+- The board goes to sleep after the sleep timeout (`0x0115`, default 3600 s) when there is
+  no current, no communication and no wake-up signal.
+- **Both MOSFETs stay closed while asleep** — the pack remains connected to the load. They
+  open only if under-voltage is detected during sleep; then logic and power path are both
+  off, and the board looks dead.
+- Wake-up sources: discharge current ≥ 2 A, a charger at least 2 V above the pack voltage,
+  the S1 button input, a key switch, CAN or RS485 traffic.
+
+**UART polling does not count as communication.** On board 2 with the factory 3600 s
+timeout, the board fell asleep while a host kept polling it over this connector every 5 s.
+If your monitor is powered from the 12 V pin and has to stay up, set the timeout to 65535.
 
 ---
 
@@ -702,6 +720,8 @@ Check the transport, then sanity-check the values.
 - Setting changes and alarms share one 400-record ring.
 - The sleep timeout is `0x0115` in 10 s units, not `0x0175`; "never" reads back as 65535.
 - On a fresh board, cross-check the `0x81` view against `0xD2`.
+- UART polling does not keep the board awake; a host on the 12 V pin needs `0x0115` = 65535.
+- Asleep, the MOSFETs stay closed — unless under-voltage hits, and then the board looks dead.
 
 ---
 
