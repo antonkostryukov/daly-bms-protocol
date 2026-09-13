@@ -285,6 +285,20 @@ The **return** value is the hysteresis point — the level at which a tripped pr
 clears. For a low-side threshold it sits *above* the trip point, and for a high-side one
 below it.
 
+**A warning does not clear at the return value.** On board 2 a raised over-voltage warning
+clears about **100 mV per cell below its threshold**, while the protection clears exactly at
+the return value. Measured on the pack at rest (27.6 V, no current) by moving the threshold —
+writing the protection through `0xD2`: with the pack 0.1, 0.6 and 0.7 V below the warning it
+stayed up for 45 s each, although the return equals the warning and the pack was below it;
+at 0.9 and 1.0 V below it cleared at once. Window 0.7–0.9 V, i.e. 8 × 100 mV. For a single
+cell there is one observation: warning 3.600, cleared at 3.500 — which also equals the SOC
+calibration at `0x0229`, so that link is not excluded yet. The board re-evaluates the warning
+when the threshold changes, not only when the voltage moves.
+
+Practical consequence: a float voltage between the release point and the threshold keeps a
+tripped warning up indefinitely — a pack warning at 28.2 V will not clear while the charger
+floats at 27.6 V, but will at 27.2 V.
+
 **Current is the exception** — five registers, and no return value:
 
 ```
@@ -750,6 +764,7 @@ Check the transport, then sanity-check the values.
 - UART polling does not keep the board awake; a host on the 12 V pin needs `0x0115` = 65535.
 - Asleep, the MOSFETs stay closed — unless under-voltage hits, and then the board looks dead.
 - The board clock drifts; set it at `0x0123`–`0x0125` in one `0x10` frame.
+- A warning clears ~100 mV per cell below its threshold, not at the return value; a float voltage in between keeps it up.
 
 ---
 
