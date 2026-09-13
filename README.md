@@ -396,10 +396,15 @@ The request looks ordinary. The reply does not:
 (`51 03 85` + 133 + CRC). If your Modbus buffer is smaller, the reply is truncated, CRC
 fails, and it looks exactly like "this register does not exist".
 
-**Ring of 400 records on board 1, 190 on board 2.** Index 1 is the newest, the last index
-the oldest, 0 is an alias for the oldest. The ring size is in the record itself (bytes
-2–3) — **read it, do not hard-code it.** Past the end of the ring the board does not answer,
-so a mirror that walks down to 400 on board 2 stalls at index 191 and retries forever.
+**Ring of 400 records on board 1.** Index 1 is the newest, the last index the oldest, 0 is
+an alias for the oldest. **Bytes 2–3 of a record hold the number of records currently in the
+ring** — its capacity once full. Board 2's ring is still filling up (190 records on
+11 Sept 2026, 217 two days later; its capacity is not established). Past the last record the
+board does not answer, so **read the count, do not hard-code 400**: a mirror that walks down
+to a fixed 400 stalls at the first missing index and retries forever.
+
+> **Correction.** An earlier revision said board 2 has a ring of 190. That was the fill count
+> of a ring that was not yet full.
 
 ### Record layout (133 bytes)
 
@@ -411,7 +416,7 @@ offsets, but the event code and value (103–108) do not: the 20 newest records 
 | Offset | Contents | Scale |
 |--------|----------|-------|
 | 0–1 | position in the ring | changes on every shift; not content |
-| 2–3 | ring size | 400 on board 1, 190 on board 2 |
+| 2–3 | records in the ring (= capacity once full: 400 on board 1) | grows while the ring fills |
 | 5–10 | **event time** | YY MM DD hh mm ss, board clock |
 | 13–14 | pack voltage | V×10 |
 | 15–16 | current | offset 30000, 0.1 A |
@@ -758,7 +763,7 @@ Check the transport, then sanity-check the values.
 - Derived levels are recalculated only on the `0xD2` path.
 - "Changed it and changed it back" leaves derived registers shifted.
 - A valid reply can still contain impossible values.
-- Setting changes and alarms share one ring — 400 records on board 1, 190 on board 2; read the size from the record.
+- Setting changes and alarms share one ring (400 records on board 1); bytes 2–3 give the current count — read it, the board is silent past it.
 - The sleep timeout is `0x0115` in 10 s units, not `0x0175`; "never" reads back as 65535.
 - On a fresh board, cross-check the `0x81` view against `0xD2`.
 - UART polling does not keep the board awake; a host on the 12 V pin needs `0x0115` = 65535.
