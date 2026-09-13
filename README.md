@@ -21,6 +21,7 @@ same family:
 | Software string (`0x0178`) | `70_260316_01T6` | `70_260625_01T4` |
 | Balancer | 1 A active | 1 A active |
 | Temperature sensors | 4 | 2 |
+| Case colour | red | blue |
 
 Vendor apps: "Smart BMS" and "Smart BMS Pro" / "DALY BMS".
 
@@ -211,7 +212,7 @@ register, `0x10` to write several.
 | `0x0052` / `0x0053` | **actual** charge / discharge MOS position | 0–1 |
 | `0x0057` / `0x0058` | mean cell voltage / power | mV / W |
 | `0x005A` | MOSFET temperature | °C + 40 |
-| `0x0061`–`0x0063` | board clock | one byte per field |
+| `0x0061`–`0x0063` | board clock, running (see §8.3) | YY MM DD hh mm ss, local time |
 | `0x0072` | forced-closure state (see §8) | 0 or 4 |
 | `0x00A9`+`0x00AA` | total lifetime uptime | `u32`, seconds |
 | `0x00AB`+`0x00AC` | uptime since power-on | `u32`, seconds |
@@ -236,7 +237,7 @@ register, `0x10` to write several.
 | `0x0117` / `0x0119` | balancer current setting / balancing enabled | mA / 0–1 |
 | `0x011A` / `0x011B` | balance start voltage / start delta (`0x011A` mirrored at `0x022A`) | mV |
 | `0x0121` / `0x0122` | charge / discharge switch **permission** | 0–1 |
-| `0x0123`–`0x0125` | board clock (second mirror at `0x00D4`) | one byte per field |
+| `0x0123`–`0x0125` | board clock — **write the time here** (§8.3) | YY MM DD hh mm ss |
 | `0x0126`–`0x0128` | **password**, 6 ASCII chars, plaintext | — |
 | `0x0129`–`0x012A` | production date | YY MM DD |
 | `0x012E` | forced closure: write 1 to arm, read for seconds left | s |
@@ -381,19 +382,22 @@ The request looks ordinary. The reply does not:
 (`51 03 85` + 133 + CRC). If your Modbus buffer is smaller, the reply is truncated, CRC
 fails, and it looks exactly like "this register does not exist".
 
-**Ring of 400 records.** Index 1 is the newest, 400 the oldest, 0 is an alias for the
-oldest. The ring size is in the record itself (bytes 2–3). Asking for index 1000 gets no
-answer.
+**Ring of 400 records on board 1, 190 on board 2.** Index 1 is the newest, the last index
+the oldest, 0 is an alias for the oldest. The ring size is in the record itself (bytes
+2–3) — **read it, do not hard-code it.** Past the end of the ring the board does not answer,
+so a mirror that walks down to 400 on board 2 stalls at index 191 and retries forever.
 
 ### Record layout (133 bytes)
 
-Verified against live readings on 24 records — voltage, current, SOC and all cell voltages
-matched.
+Verified against live readings on 24 records of board 1 — voltage, current, SOC and all cell
+voltages matched. On board 2 time, pack voltage, current, SOC and cells sit at the same
+offsets, but the event code and value (103–108) do not: the 20 newest records all read
+`1122` / `220` there. Where board 2 keeps them is not established.
 
 | Offset | Contents | Scale |
 |--------|----------|-------|
 | 0–1 | position in the ring | changes on every shift; not content |
-| 2–3 | ring size | 400 |
+| 2–3 | ring size | 400 on board 1, 190 on board 2 |
 | 5–10 | **event time** | YY MM DD hh mm ss, board clock |
 | 13–14 | pack voltage | V×10 |
 | 15–16 | current | offset 30000, 0.1 A |
@@ -414,7 +418,7 @@ app produces a burst of four records with the same timestamp (warning, protectio
 and the second layer).
 
 The practical consequence: **setting changes evict alarms from the same ring.** A session
-of tuning can burn dozens of the 400 slots. If the journal matters to you, mirror it to
+of tuning can burn dozens of slots. If the journal matters to you, mirror it to
 your own storage.
 
 Because the board clock jumps backwards when the board reboots, store your own timestamp
@@ -547,6 +551,7 @@ Two caveats on reading back:
 | Balancing enable | Modbus write to `0x0119`, 0 or 1 |
 | Board reboot | Modbus write to `0x00F0`, **any value** |
 | Forced closure | Modbus write `1` to `0x012E` |
+| Board clock | Modbus `0x10` write of three registers at `0x0123` |
 
 ### 8.1 Board reboot
 
@@ -555,7 +560,7 @@ Both vendor apps send a write to `0x00F0`; the value appears irrelevant (`0x0000
 
 **There is no echo**, because the board reboots before it can answer. Every other write is
 acknowledged, so the silence here is easy to misread as failure. Judge by the consequence:
-read the uptime counter `0x00AB` before and after. On the test board it went `961 → 0`.
+read the uptime counter `0x00AB` before and after. On board 1 it went `961 → 0`.
 
 A reboot clears a latched **warning** flag. It does **not** clear a latched current
 protection — that one opens the switches and needs a charger, a B− to P− jumper, or a
@@ -591,6 +596,28 @@ Three things worth knowing before you use it:
    physically closed). That divergence is the reliable "protection is bypassed" indicator —
    and it is also a trap: **when the timer lapses, the board applies the permission and
    opens both switches**, disconnecting the battery.
+
+### 8.3 Board clock
+
+The board keeps its own clock and stamps journal records with it (§6). It drifts: board 2
+arrived **37.5 minutes fast**, and on board 1 a reboot made it jump backwards. The vendor
+app did not set it in the captured session, so a host with a real time source has to.
+
+| Register | Contents |
+|----------|----------|
+| `0x0123`–`0x0125` | write here: `YY MM` · `DD hh` · `mm ss`, one byte per field, local time |
+| `0x0061`–`0x0063` | the running clock, same layout |
+
+Write all three registers in **one** `0x10` frame (non-standard, no byte count — §7.4):
+
+```
+81 10 01 23 00 03 1A 09 0D 12 0D 17 <CRC>     2026-09-13 18:13:23
+```
+
+Three separate `0x06` writes can straddle a minute rollover and leave the clock a minute
+off. Verified on board 2: right after the write the running clock at `0x0061` matched the
+host within one second. Board 1 also mirrored the clock at `0x00D4`; on board 2 that reads
+`FFFF`.
 
 ---
 
@@ -655,7 +682,7 @@ current: the top-cell offset was within 13 mV at 10 A and up to 97 mV at 25 A.
 
 ### 9.3 The SOC counter drifts down at rest
 
-On the test board the "total discharged" counter (`0x010F`) increments by 1 mAh every 128 s
+On board 1 the "total discharged" counter (`0x010F`) increments by 1 mAh every 128 s
 with the pack at rest and the current reading at 0.0 A — a phantom **28 mA**, about
 0.68 Ah/day. Independently confirmed over a 23.7-hour window.
 
@@ -717,11 +744,12 @@ Check the transport, then sanity-check the values.
 - Derived levels are recalculated only on the `0xD2` path.
 - "Changed it and changed it back" leaves derived registers shifted.
 - A valid reply can still contain impossible values.
-- Setting changes and alarms share one 400-record ring.
+- Setting changes and alarms share one ring — 400 records on board 1, 190 on board 2; read the size from the record.
 - The sleep timeout is `0x0115` in 10 s units, not `0x0175`; "never" reads back as 65535.
 - On a fresh board, cross-check the `0x81` view against `0xD2`.
 - UART polling does not keep the board awake; a host on the 12 V pin needs `0x0115` = 65535.
 - Asleep, the MOSFETs stay closed — unless under-voltage hits, and then the board looks dead.
+- The board clock drifts; set it at `0x0123`–`0x0125` in one `0x10` frame.
 
 ---
 
